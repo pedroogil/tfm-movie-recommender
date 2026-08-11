@@ -4,9 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.ingestion.tmdb_client import (
-    find_movie_by_imdb_id,
-)
+from src.ingestion.tmdb_client import find_movie_by_imdb_id
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -27,7 +25,7 @@ OUTPUT_PATH = (
 
 
 def load_processed_ids() -> set[str]:
-    """Load IMDb IDs already processed."""
+    """Load IMDb IDs that have already been processed."""
 
     if not OUTPUT_PATH.exists():
         return set()
@@ -50,22 +48,23 @@ movies = pd.read_parquet(INPUT_PATH)
 
 processed_ids = load_processed_ids()
 
-print(
-    f"Already processed: "
-    f"{len(processed_ids):,}"
-)
-
 remaining = movies[
     ~movies["tconst"].isin(processed_ids)
-]
+].copy()
 
-remaining = remaining.head(1000)
+print(f"Already processed: {len(processed_ids):,}")
+print(f"Remaining: {len(remaining):,}")
 
-print(
-    f"Remaining: "
-    f"{len(remaining):,}"
-)
+if len(remaining) == 0:
+    print("Nothing to process.")
+    raise SystemExit
 
+
+matched = 0
+not_found = 0
+errors = 0
+
+start_time = time.time()
 
 with OUTPUT_PATH.open(
     "a",
@@ -83,17 +82,25 @@ with OUTPUT_PATH.open(
                 imdb_id
             )
 
+            if tmdb_id is not None:
+
+                status = "matched"
+                matched += 1
+
+            else:
+
+                status = "not_found"
+                not_found += 1
+
             record = {
                 "tconst": imdb_id,
                 "tmdb_id": tmdb_id,
-                "status": (
-                    "matched"
-                    if tmdb_id is not None
-                    else "not_found"
-                ),
+                "status": status,
             }
 
         except Exception as error:
+
+            errors += 1
 
             record = {
                 "tconst": imdb_id,
@@ -101,6 +108,10 @@ with OUTPUT_PATH.open(
                 "status": "error",
                 "error": str(error),
             }
+
+            print(
+                f"ERROR {imdb_id}: {error}"
+            )
 
         output_file.write(
             json.dumps(
@@ -114,9 +125,45 @@ with OUTPUT_PATH.open(
 
         if index % 100 == 0:
 
+            elapsed = time.time() - start_time
+
             print(
                 f"Processed "
-                f"{index:,}/{len(remaining):,}"
+                f"{index:,}/{len(remaining):,} "
+                f"| "
+                f"Matched: {matched:,} "
+                f"| "
+                f"Not found: {not_found:,} "
+                f"| "
+                f"Errors: {errors:,} "
+                f"| "
+                f"Time: {elapsed / 60:.1f} min"
             )
 
-        time.sleep(0.1)
+        # Small pause between requests.
+        time.sleep(0.25)
+
+
+elapsed = time.time() - start_time
+
+print("\n=== PROCESS FINISHED ===")
+
+print(
+    f"Processed: {len(remaining):,}"
+)
+
+print(
+    f"Matched: {matched:,}"
+)
+
+print(
+    f"Not found: {not_found:,}"
+)
+
+print(
+    f"Errors: {errors:,}"
+)
+
+print(
+    f"Time: {elapsed / 60:.1f} minutes"
+)
