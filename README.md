@@ -84,13 +84,6 @@ data/
     ├── imdb_tmdb_mapping.jsonl
     └── tmdb_movies_enriched.jsonl
 
-Instalación
-
-python -m venv tfm
-# Windows
-tfm\Scripts\activate
-pip install -r requirements.txt
-
 Comandos principales
 
 Construcción del catálogo IMDb:
