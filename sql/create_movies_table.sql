@@ -19,24 +19,19 @@ CREATE TABLE movies (
     average_rating DOUBLE PRECISION,
     num_votes BIGINT,
 
-    -- TMDB semantic information
+    -- TMDB information
     overview TEXT NOT NULL,
     genres TEXT,
     keywords TEXT,
     director TEXT,
     cast_names TEXT,
 
-    -- Exact text used to generate the embedding
+    -- Exact text used to create the vector
     semantic_text TEXT NOT NULL,
 
     -- all-MiniLM-L6-v2 embedding
     embedding VECTOR(384) NOT NULL
 );
-
-CREATE INDEX idx_movies_embedding
-ON movies
-USING ivfflat (embedding vector_cosine_ops)
-WITH (lists = 100);
 
 CREATE INDEX idx_movies_title
 ON movies (title);
