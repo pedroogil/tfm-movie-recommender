@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import psycopg
 
@@ -5,13 +7,14 @@ from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
 
 
-DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "dbname": "tfm_movies",
-    "user": "tfm_user",
-    "password": "tfm_password",
-}
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    (
+        "postgresql://"
+        "tfm_user:tfm_password"
+        "@localhost:5432/tfm_movies"
+    ),
+)
 
 MODEL_NAME = (
     "sentence-transformers/"
@@ -22,6 +25,11 @@ MODEL_NAME = (
 class RecommendationService:
     """
     Service layer for semantic movie recommendation.
+
+    The service can connect either to:
+
+    - Supabase / cloud PostgreSQL through DATABASE_URL
+    - Local Docker PostgreSQL as fallback
     """
 
     def __init__(self) -> None:
@@ -33,12 +41,18 @@ class RecommendationService:
 
     def _connect(self):
         """
-        Create a PostgreSQL connection
-        and register pgvector support.
+        Create a PostgreSQL connection and register
+        pgvector support.
         """
 
         connection = psycopg.connect(
-            **DB_CONFIG
+            DATABASE_URL,
+            sslmode=(
+                "require"
+                if os.getenv("DATABASE_URL")
+                else "prefer"
+            ),
+            connect_timeout=10,
         )
 
         register_vector(
@@ -51,6 +65,9 @@ class RecommendationService:
         self,
         query: str,
         top_k: int = 10,
+        min_rating: float = 0.0,
+        min_year: int | None = None,
+        max_year: int | None = None,
     ) -> list[dict]:
         """
         Search movies from a natural-language query.
@@ -64,14 +81,49 @@ class RecommendationService:
             .astype(np.float32)
         )
 
+        filters = [
+            "average_rating >= %s"
+        ]
+
+        params = [
+            min_rating
+        ]
+
+        if min_year is not None:
+            filters.append(
+                "release_year >= %s"
+            )
+
+            params.append(
+                min_year
+            )
+
+        if max_year is not None:
+            filters.append(
+                "release_year <= %s"
+            )
+
+            params.append(
+                max_year
+            )
+
+        where_clause = (
+            " AND ".join(filters)
+        )
+
         with self._connect() as connection:
 
             with connection.cursor() as cursor:
 
                 cursor.execute(
-                    """
+                    "SET statement_timeout = '15s';"
+                )
+
+                query_sql = f"""
                     SELECT
                         id,
+                        tconst,
+                        tmdb_id,
                         title,
                         original_title,
                         release_year,
@@ -86,16 +138,25 @@ class RecommendationService:
                         1 - (
                             embedding <=> %s
                         ) AS similarity
-                    FROM movies
+                    FROM public.movies
+                    WHERE {where_clause}
                     ORDER BY
                         embedding <=> %s
                     LIMIT %s;
-                    """,
-                    (
-                        query_embedding,
+                """
+
+                query_params = (
+                    [query_embedding]
+                    + params
+                    + [
                         query_embedding,
                         top_k,
-                    ),
+                    ]
+                )
+
+                cursor.execute(
+                    query_sql,
+                    query_params,
                 )
 
                 rows = cursor.fetchall()
@@ -111,20 +172,31 @@ class RecommendationService:
         self,
         movie_id: int,
         top_k: int = 10,
+        min_rating: float = 0.0,
+        min_year: int | None = None,
+        max_year: int | None = None,
     ) -> list[dict]:
         """
         Recommend movies similar to a selected movie.
         """
+
+        filters = [
+            "id <> %s",
+            "average_rating >= %s",
+        ]
 
         with self._connect() as connection:
 
             with connection.cursor() as cursor:
 
                 cursor.execute(
+                    "SET statement_timeout = '15s';"
+                )
+
+                cursor.execute(
                     """
-                    SELECT
-                        embedding
-                    FROM movies
+                    SELECT embedding
+                    FROM public.movies
                     WHERE id = %s;
                     """,
                     (
@@ -141,10 +213,38 @@ class RecommendationService:
 
                 embedding = result[0]
 
-                cursor.execute(
-                    """
+                params = [
+                    movie_id,
+                    min_rating,
+                ]
+
+                if min_year is not None:
+                    filters.append(
+                        "release_year >= %s"
+                    )
+
+                    params.append(
+                        min_year
+                    )
+
+                if max_year is not None:
+                    filters.append(
+                        "release_year <= %s"
+                    )
+
+                    params.append(
+                        max_year
+                    )
+
+                where_clause = (
+                    " AND ".join(filters)
+                )
+
+                query_sql = f"""
                     SELECT
                         id,
+                        tconst,
+                        tmdb_id,
                         title,
                         original_title,
                         release_year,
@@ -159,18 +259,25 @@ class RecommendationService:
                         1 - (
                             embedding <=> %s
                         ) AS similarity
-                    FROM movies
-                    WHERE id <> %s
+                    FROM public.movies
+                    WHERE {where_clause}
                     ORDER BY
                         embedding <=> %s
                     LIMIT %s;
-                    """,
-                    (
-                        embedding,
-                        movie_id,
+                """
+
+                query_params = (
+                    [embedding]
+                    + params
+                    + [
                         embedding,
                         top_k,
-                    ),
+                    ]
+                )
+
+                cursor.execute(
+                    query_sql,
+                    query_params,
                 )
 
                 rows = cursor.fetchall()
@@ -201,14 +308,20 @@ class RecommendationService:
             with connection.cursor() as cursor:
 
                 cursor.execute(
+                    "SET statement_timeout = '15s';"
+                )
+
+                cursor.execute(
                     """
                     SELECT
                         id,
+                        tconst,
+                        tmdb_id,
                         title,
                         release_year,
                         average_rating,
                         genres
-                    FROM movies
+                    FROM public.movies
                     WHERE title ILIKE %s
                     ORDER BY
                         num_votes DESC
@@ -225,10 +338,12 @@ class RecommendationService:
         return [
             {
                 "id": row[0],
-                "title": row[1],
-                "release_year": row[2],
-                "average_rating": row[3],
-                "genres": row[4],
+                "tconst": row[1],
+                "tmdb_id": row[2],
+                "title": row[3],
+                "release_year": row[4],
+                "average_rating": row[5],
+                "genres": row[6],
             }
             for row in rows
         ]
@@ -246,9 +361,15 @@ class RecommendationService:
             with connection.cursor() as cursor:
 
                 cursor.execute(
+                    "SET statement_timeout = '15s';"
+                )
+
+                cursor.execute(
                     """
                     SELECT
                         id,
+                        tconst,
+                        tmdb_id,
                         title,
                         original_title,
                         release_year,
@@ -260,7 +381,7 @@ class RecommendationService:
                         keywords,
                         director,
                         cast_names
-                    FROM movies
+                    FROM public.movies
                     WHERE id = %s;
                     """,
                     (
@@ -275,17 +396,19 @@ class RecommendationService:
 
         return {
             "id": row[0],
-            "title": row[1],
-            "original_title": row[2],
-            "release_year": row[3],
-            "runtime_minutes": row[4],
-            "average_rating": row[5],
-            "num_votes": row[6],
-            "overview": row[7],
-            "genres": row[8],
-            "keywords": row[9],
-            "director": row[10],
-            "cast_names": row[11],
+            "tconst": row[1],
+            "tmdb_id": row[2],
+            "title": row[3],
+            "original_title": row[4],
+            "release_year": row[5],
+            "runtime_minutes": row[6],
+            "average_rating": row[7],
+            "num_votes": row[8],
+            "overview": row[9],
+            "genres": row[10],
+            "keywords": row[11],
+            "director": row[12],
+            "cast_names": row[13],
         }
 
     @staticmethod
@@ -293,26 +416,27 @@ class RecommendationService:
         row,
     ) -> dict:
         """
-        Convert a recommendation SQL row
-        into a dictionary.
+        Convert a recommendation SQL row into a dictionary.
         """
 
         return {
             "id": row[0],
-            "title": row[1],
-            "original_title": row[2],
-            "release_year": row[3],
-            "runtime_minutes": row[4],
-            "average_rating": row[5],
-            "num_votes": row[6],
-            "overview": row[7],
-            "genres": row[8],
-            "keywords": row[9],
-            "director": row[10],
-            "cast_names": row[11],
+            "tconst": row[1],
+            "tmdb_id": row[2],
+            "title": row[3],
+            "original_title": row[4],
+            "release_year": row[5],
+            "runtime_minutes": row[6],
+            "average_rating": row[7],
+            "num_votes": row[8],
+            "overview": row[9],
+            "genres": row[10],
+            "keywords": row[11],
+            "director": row[12],
+            "cast_names": row[13],
             "similarity": (
-                float(row[12])
-                if row[12] is not None
+                float(row[14])
+                if row[14] is not None
                 else None
             ),
         }
